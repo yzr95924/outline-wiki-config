@@ -46,7 +46,10 @@ services:
 ##END
   wk-outline:
     image: outlinewiki/outline:${OUTLINE_VERSION}
-    command: sh -c "yarn db:migrate --env production-ssl-disabled && yarn start"
+    # Outline >= ~1.0 declares yarn@4.x in package.json which triggers
+    # corepack. The image's default entrypoint already runs migrations +
+    # start; the explicit `yarn ...` command below works only when corepack
+    # is enabled, so we rely on the default entrypoint.
     environment:
       - DATABASE_URL=postgres://user:pass@wk-postgres:5432/outline
       - DATABASE_URL_TEST=postgres://user:pass@wk-postgres:5432/outline-test

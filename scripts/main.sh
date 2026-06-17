@@ -146,7 +146,19 @@ function init_cfg {
 
 function reload_nginx {
     cd ..;
-    until docker-compose exec wk-nginx nginx -s reload
+    # Use 'docker compose' (v2) when 'docker-compose' (v1) is not installed.
+    # Note: utils.sh turns on `expand_aliases` and defines an `alias docker-compose`,
+    # so `command -v docker-compose` would return success for the alias even when
+    # the real binary is missing. `type -P` ignores aliases/functions and only
+    # checks PATH for an executable.
+    if type -P docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    else
+        DOCKER_COMPOSE_CMD="docker compose"
+    fi
+    # `docker compose exec` does not auto-load .env (only `up` does); pass it
+    # explicitly so that ${NETWORKS_EXTERNAL} etc. resolve correctly.
+    until $DOCKER_COMPOSE_CMD --env-file .env exec wk-nginx nginx -s reload
     do
         echo "waiting nginx"
         sleep 1
