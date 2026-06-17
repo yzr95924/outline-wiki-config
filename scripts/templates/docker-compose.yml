@@ -1,10 +1,11 @@
-version: "3"
 services:
   wk-redis:
     image: redis:latest
     restart: always
     networks:
       - ${NETWORKS}
+    logging:
+      driver: none
   wk-postgres:
     image: postgres:${POSTGRES_VERSION}
     environment:
@@ -16,7 +17,9 @@ services:
     restart: always
     networks:
       - ${NETWORKS}
-##BEGIN MINIO 
+    logging:
+      driver: none
+##BEGIN MINIO
   wk-minio:
     image: minio/minio:${MINIO_VERSION}
     volumes:
@@ -28,6 +31,8 @@ services:
     restart: always
     networks:
       - ${NETWORKS}
+    logging:
+      driver: none
   wk-createbuckets:
     image: minio/mc:${MINIO_MC_VERSION}
     depends_on:
@@ -43,6 +48,8 @@ services:
       "
     networks:
       - ${NETWORKS}
+    logging:
+      driver: none
 ##END
   wk-outline:
     image: outlinewiki/outline:${OUTLINE_VERSION}
@@ -64,11 +71,18 @@ services:
     depends_on:
       - wk-postgres
       - wk-redis
-##BEGIN MINIO 
+##BEGIN MINIO
       - wk-minio
 ##END
     networks:
       - ${NETWORKS}
+    # Run the outline process as root inside the container. This is insecure
+    # in general but useful for self-hosted debugging (e.g. `docker exec ...
+    # apt-get install` or fixing broken volume permissions). Remove for
+    # production deployments.
+    user: 0:0
+    logging:
+      driver: none
   wk-oidc-server:
     image: vicalloy/oidc-server
     volumes:
@@ -80,6 +94,8 @@ services:
       - ./env.oidc-server
     networks:
       - ${NETWORKS}
+    logging:
+      driver: none
   wk-nginx:
     image: nginx
     ports:
@@ -89,13 +105,15 @@ services:
       - ./data/uc/static_root:/uc/static_root:ro
     restart: always
     depends_on:
-##BEGIN MINIO 
+##BEGIN MINIO
       - wk-minio
 ##END
       - wk-outline
       - wk-oidc-server
     networks:
       - ${NETWORKS}
+    logging:
+      driver: none
 networks:
   ${NETWORKS}:
     external: ${NETWORKS_EXTERNAL}
