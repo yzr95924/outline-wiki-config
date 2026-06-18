@@ -7,7 +7,7 @@
 1. 一套简单的 `make` + `bash` 脚本，生成所有需要的配置文件
 2. `docker-compose.yml` 一键启动整套服务
 3. 自带 [OIDC server](https://github.com/vicalloy/oidc-server) 管理用户，**不需要通过 Slack / Google 登录**
-4. 支持本地文件系统存储（Outline 0.72.0+，无需 MinIO）
+4. 附件 / 头像直接存到本机 `./data/outline/` 目录，无需额外对象存储
 
 ## 快速开始
 
@@ -39,12 +39,9 @@ make install
 | --- | --- |
 | `URL` | 对外可访问的 Outline URL，**不要带端口号**（除非端口不是 80/443） |
 | `HTTP_IP` / `HTTP_PORT_IP` | nginx 监听的 IP 和端口（用户访问这里） |
-| `FILE_STORAGE` | `s3`（MinIO）或 `local`（本地文件系统）。Outline 0.72.0+ 才支持 `local` |
 | `ALLOWED_DOMAINS` | 允许登录的邮箱域名（逗号分隔）。**新增用户邮箱的域名与首个管理员不同时必须设置** |
 | `OUTLINE_VERSION` | Outline 镜像版本号 |
 | `*_SECRET_KEY` / `*_ACCESS_KEY` | 各种密钥，`make install` 第一次跑会自动生成，**不要手填** |
-
-注意：`OIDC_CLIENT_SECRET` 永远等于 `MINIO_SECRET_KEY`（项目维护者为了兼容老版本故意保留的行为，详见 `scripts/main.sh:11` 的注释）。
 
 ## Makefile 目标
 
@@ -59,7 +56,7 @@ make install
 | `make repair-oidc-client` | 强制把 OIDC client 的 `_redirect_uris` 和 `response_types` 写成正确值（**见下面的故障排查**） |
 | `make clean` | `clean-docker` + `clean-conf`（删除生成的所有配置文件，**保留 data/**） |
 | `make clean-conf` | 只删除生成的配置文件 |
-| `make clean-data` | ⚠️ 删除所有数据卷（postgres、minio、uc、outline、certs），**不可恢复** |
+| `make clean-data` | ⚠️ 删除所有数据卷（postgres、uc、outline），**不可恢复** |
 
 ## 架构
 
@@ -75,9 +72,9 @@ make install
 +----------+      +--------+--------+
      |                    |
      |                    v
-     |             +-----------------+      +-----------+
-     |             | wk-postgres:5432| <--- | wk-minio  |  (only if FILE_STORAGE=s3)
-     |             +-----------------+      +-----------+
+     |             +-----------------+
+     |             | wk-postgres:5432|
+     |             +-----------------+
      |
      +----> /uc/*  --> wk-oidc-server:8000
                               |
@@ -103,7 +100,7 @@ make install
 │   ├── utils.sh                            # sed helper
 │   └── templates/                          # 配置文件模板源
 │       ├── docker-compose.yml
-│       ├── .env, env.outline, env.oidc, env.oidc-server, env.minio
+│       ├── .env, env.outline, env.oidc, env.oidc-server
 │       ├── config/nginx/                   # nginx default.conf + include/proxy.conf
 │       └── oidc-server-outline-client.json # OIDC client 注册 fixture
 └── config/                                 # 渲染后产物（git ignored）
@@ -118,9 +115,9 @@ update_config_file        # 填 *_SECRET_KEY 占位符
   ↓
 create_docker_compose_file
   ↓
-create_env_files          # .env, env.outline, env.oidc, env.oidc-server, env.minio(if s3), fixture
+create_env_files          # .env, env.outline, env.oidc, env.oidc-server, fixture
   ↓
-create_apps_config        # nginx 配置复制；FILE_STORAGE != s3 时 rm_block "MINIO" 去掉 MinIO 段
+create_apps_config        # nginx 配置复制
 ```
 
 ## 故障排查与修复
@@ -290,10 +287,6 @@ wk-outline:
 docker compose exec wk-oidc-server python manage.py changepassword <username>
 ```
 
-**Q：怎么把 MinIO 切到 local 存储？**
-
-`scripts/config.sh` 里 `FILE_STORAGE=local`，然后 `make clean-conf && make install`。MinIO 段会被自动从 `docker-compose.yml` 和 nginx 配置里删掉（`rm_block "MINIO"` 流程）。
-
 **Q：升级 Outline 版本？**
 
 1. 改 `scripts/config.sh` 里的 `OUTLINE_VERSION`
@@ -314,5 +307,3 @@ docker compose exec wk-oidc-server python manage.py changepassword <username>
 5. **`logging: driver: none`**：默认关闭容器日志收集，`docker logs` 拿不到东西。调试时建议临时给 `wk-outline` 和 `wk-oidc-server` 加 `json-file` logging。
 
 6. **Outline 镜像升级可能影响 OIDC plugin 行为**：Outline 1.8.x 用了 `app.proxy = true` + `IsUrl` 校验，新版本可能改了默认值，升级后请走一遍完整 OIDC 流程验证。
-
-7. **`OIDC_CLIENT_SECRET == MINIO_SECRET_KEY`**：`scripts/main.sh:11` 注释说"do not fix this bug for backward compatibility"。新部署没历史包袱的话，可以把 `OIDC_CLIENT_SECRET` 改成独立生成。
