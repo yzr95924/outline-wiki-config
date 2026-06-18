@@ -4,3 +4,6 @@
 /env*
 /docker-compose.yml
 /.orphans_report.tsv
+# User-local config — copy scripts/config.sh.sample → scripts/config.sh and
+# edit locally. Never tracked, since it will hold generated *_SECRET_KEYs.
+/scripts/config.sh
