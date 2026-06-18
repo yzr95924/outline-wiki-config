@@ -4,6 +4,12 @@ services:
     restart: always
     networks:
       - ${NETWORKS}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     logging:
       driver: none
   wk-postgres:
@@ -17,6 +23,12 @@ services:
     restart: always
     networks:
       - ${NETWORKS}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d outline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     logging:
       driver: none
 ##BEGIN MINIO
@@ -31,12 +43,19 @@ services:
     restart: always
     networks:
       - ${NETWORKS}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/ready -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     logging:
       driver: none
   wk-createbuckets:
     image: minio/mc:${MINIO_MC_VERSION}
     depends_on:
-      - wk-minio
+      wk-minio:
+        condition: service_healthy
     env_file:
       - ./env.minio
     entrypoint: >
@@ -69,11 +88,16 @@ services:
       - ./data/outline:/var/lib/outline/data
     restart: always
     depends_on:
-      - wk-postgres
-      - wk-redis
+      wk-postgres:
+        condition: service_healthy
+      wk-redis:
+        condition: service_healthy
 ##BEGIN MINIO
-      - wk-minio
+      wk-minio:
+        condition: service_healthy
 ##END
+      wk-oidc-server:
+        condition: service_healthy
     networks:
       - ${NETWORKS}
     # Run the outline process as root inside the container. This is insecure
@@ -81,8 +105,21 @@ services:
     # apt-get install` or fixing broken volume permissions). Remove for
     # production deployments.
     user: 0:0
+    healthcheck:
+      # The outline image is Node-based and ships no `python`, so we use
+      # `wget` (present in the image) to probe the HTTP server. A 2xx/3xx
+      # response is enough: Outline's root redirects to /login when
+      # unauthenticated, which is exactly the "app is up" signal we want.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   wk-oidc-server:
     image: vicalloy/oidc-server
     volumes:
@@ -94,8 +131,24 @@ services:
       - ./env.oidc-server
     networks:
       - ${NETWORKS}
+    healthcheck:
+      # The oidc-server image is a slim Python image and may not include
+      # `python` on PATH in some versions, so we use `wget` (always present
+      # via busybox) to probe the HTTP server. Hitting the OIDC discovery
+      # endpoint from inside the container requires FORCE_SCRIPT_NAME=/uc on
+      # the inbound URL which is brittle, so we just probe the root — any
+      # 2xx/3xx response means the WSGI server is bound and the app is
+      # serving (correctness is exercised by the actual login flow).
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   wk-nginx:
     image: nginx
     ports:
@@ -106,10 +159,13 @@ services:
     restart: always
     depends_on:
 ##BEGIN MINIO
-      - wk-minio
+      wk-minio:
+        condition: service_healthy
 ##END
-      - wk-outline
-      - wk-oidc-server
+      wk-outline:
+        condition: service_healthy
+      wk-oidc-server:
+        condition: service_healthy
     networks:
       - ${NETWORKS}
     logging:
