@@ -58,6 +58,73 @@ make install
 | `make clean-conf` | 只删除生成的配置文件 |
 | `make clean-data` | ⚠️ 删除所有数据卷（postgres、uc、outline），**不可恢复** |
 
+## 维护工具
+
+仓库根目录还有几个独立的维护脚本，不通过 Makefile 入口。
+
+### `cleanup_outline.sh`
+
+手动触发 Outline 自带的 daily cron（清理过期 session、孤立 api key 等）：
+
+```bash
+./cleanup_outline.sh
+# 内部：curl -X POST "${URL}/api/cron.daily?token=${OUTLINE_UTILS_SECRET}"
+```
+
+**注意**：Outline 的 daily cron 在 `FILE_STORAGE=local`（本项目默认）路径下并不会清理磁盘上的孤儿附件，所以光跑它不够，需要配合下面的 `cleanup_orphans.sh`。
+
+### `cleanup_orphans.sh`
+
+清理"DB 里有附件记录 / 磁盘上有文件，但没有任何文档实际引用"的孤立附件。Outline 的 daily cron 在 local 存储模式下不会回收这类对象，长期运行会越积越多。
+
+#### 检测出的三类孤儿
+
+| 类别 | 含义 | 典型场景 |
+| --- | --- | --- |
+| **C1** `deleted_doc` | attachment 的 `documentId` 在 documents 表中找不到，**且**没有任何文档引用 | 文档被硬删除且图片没在其他地方复用 |
+| **C2** `unreferenced` | attachment 和文件都在磁盘上，但没有被任何文档或历史版本引用 | 用户上传了图片但从未插入到正文；或被编辑时删掉 |
+| **C3** `missing_file` | attachment 在 DB 中，但磁盘文件已丢失 | 手动删除过文件；container 重建丢失了挂载；或同步脚本 bug |
+
+C1/C2 同时删除 DB 行 + 磁盘目录；C3 只删 DB 行（文件已经没了）。
+
+#### 两阶段工作流
+
+```bash
+# 第 1 步：扫描，生成候选清单 .orphans_report.tsv
+./cleanup_orphans.sh scan
+
+# 第 2 步：查看清单 + URL（在浏览器里打开核实图片）
+./cleanup_orphans.sh show
+
+# 第 3 步（可选）：手动编辑清单，把不想删的行从 delete 改成 keep
+vim .orphans_report.tsv
+
+# 第 4 步：执行删除（会要求输入 yes 确认）
+./cleanup_orphans.sh clean
+# 非交互模式（脚本里调用）：
+YES=1 ./cleanup_orphans.sh clean
+```
+
+每个候选都会附带形如 `${URL}/api/attachments.redirect?id=<attachment-id>` 的 URL，浏览器打开可以预览这张图是否真的没有用。
+
+#### 报告文件格式
+
+`.orphans_report.tsv`（**pipe `|` 分隔**，不是 tab。gitignored）：
+
+```
+CATEGORY|ATTACHMENT_ID|DB_SIZE|DISK_SIZE|DISK|DISK_PATH|DOC_TITLE|ACTION
+C2_unreferenced|d32c1cba-...|19710|19710|yes|/root/.../d32c1cba-...|bazel|delete
+C3_missing_file|3877b32b-...|1266236|0|no||Lakehouse|delete
+```
+
+**为什么用 `|` 而不是 tab**：`do_clean` 用 bash 的 `read IFS='|'` 解析每行；如果用 tab，bash 会把连续的 IFS 空白合并成一个分隔符——C3 行的 `disk_path` 是空的，会变成 `...|no|<tab><tab>|doc|delete`，中间的空字段被吞掉、`ACTION` 整列错位、整行被静默跳过（没有任何 warning）。`|` 不是空白字符，empty field 保留。
+
+每行末尾的 `ACTION` 列是 `clean` 阶段唯一看的字段：`delete` 才会被处理，`keep` 跳过。把某行改成 `keep` 后无需重新跑 `scan`，直接 `clean` 即可。
+
+#### 集成到定期任务
+
+建议把 `cleanup_orphans.sh` 加进周维护（仅 `scan + show` 输出人工 review，`clean` 留作按需手动跑）。如果想全自动，可以加一个 `--older-than 7d` 之类的保护（避免清理掉最近上传还没来得及插入的图片），目前脚本里尚未实现，需要的话可以再加。
+
 ## 架构
 
 ```
@@ -94,6 +161,8 @@ make install
 .
 ├── Makefile                                # 所有操作的入口
 ├── docker-compose.yml                      # 由 gen-conf 渲染（git ignored）
+├── cleanup_outline.sh                      # 手动触发 Outline daily cron
+├── cleanup_orphans.sh                      # 扫描/清理孤立附件（见"维护工具"）
 ├── scripts/
 │   ├── config.sh                           # 用户配置（需手写，从 .sample 复制）
 │   ├── main.sh                             # 渲染入口
