@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 约定
+
+- **知识一律留在仓库里。** 项目知识、排查笔记、各种"记忆"都写到**本文件**(或其他
+  纳入版本控制的文档),不要写进 Claude 的外部 `~/.claude` memory 目录,这样所有
+  内容都跟着 git repo 一起走。
+
 ## What this repo is
 
 A Docker-Compose-based installer for a self-hosted [Outline](https://github.com/outline/outline) wiki, with a bundled OIDC server (`vicalloy/oidc-server`) replacing Slack/Google login. Attachments and avatars are stored on the local filesystem under `./data/outline/`.
@@ -75,44 +81,43 @@ There is no build/test step — this repo is pure orchestration. Typical change 
 
 To iterate on a single service without losing state: `make restart` (re-runs `init_cfg` and `reload_nginx`) or just `docker compose restart <svc>`.
 
-## Troubleshooting
+## 排查
 
-### New-device / incognito login returns 502 Bad Gateway or `notice=auth-error`
+### 新设备 / 无痕窗口登录报 502 Bad Gateway 或 `notice=auth-error`
 
-OIDC login flow: browser → Outline `/auth/oidc.callback` → Outline exchanges
-the auth code at the oidc-server token endpoint (`OIDC_TOKEN_URI`, internal via
-`wk-nginx`) → sets session cookie and redirects. Outline applies a ~10s request
-timeout on the callback, so a slow token exchange surfaces as a 502 on the
-callback (`upstream prematurely closed connection while reading response
-header from upstream` in the nginx log). Outline's backend exchange can still
-succeed (a `users.signin` event is logged) — the browser just never receives
-the redirect. Existing sessions bypass OIDC entirely, so **only fresh logins
-(new device / incognito) are affected** — a strong tell.
+OIDC 登录流程:浏览器 → Outline `/auth/oidc.callback` → Outline 到 oidc-server 的
+token 端点换 code(`OIDC_TOKEN_URI`,走内网 `wk-nginx`)→ 写 session cookie 并跳转。
+Outline 对回调有约 10 秒的请求超时,所以**换 token 慢**就会在回调上表现为 502
+(nginx 日志:`upstream prematurely closed connection while reading response header
+from upstream`)。Outline 后端那次交换其实仍可能成功(会记一条 `users.signin` 事件),
+只是浏览器始终没收到跳转响应。已有 session 的设备不走 OIDC,所以**只有全新登录
+(新设备 / 无痕窗口)才中招** —— 这是强判别特征。
 
-Root cause observed here: **RSA signing-key accumulation.** `make install`
-runs `creatersakey` unconditionally inside `wk-oidc-server`, so every install
-adds an `oidc_provider.RSAKey` row. `oidc_provider`'s `get_client_alg_keys`
-re-imports *every* RSA key (`importKey`, ~0.4s each, **uncached**) on every
-token request, so token-exchange time ≈ key_count × 0.4s. With ~28 keys that
-reached ~11s > the ~10s callback timeout → 502 on every new-device login. The
-Makefile dedupes to a single key (`dedupe_rsakeys`, best-effort, keeps the
-oldest) both after `make init` and on every `make start` / `make restart`, so
-Ctrl-C'd or manual `creatersakey` leftovers self-heal on the next start; if the
-symptom ever returns, check and trim the key count:
+这里的根因:**RSA 签名密钥累积。** `make install` 会在 `wk-oidc-server` 里无条件执行
+`creatersakey`,每次安装都新增一个 `oidc_provider.RSAKey`。而 oidc_provider 的
+`get_client_alg_keys` 每次换 token 都会把**所有** RSA key 重新 `importKey` 一次(每个
+约 0.4 秒,且**不缓存**),因此换 token 耗时 ≈ key 数 × 0.4s。累积到约 28 个 key 时
+达到约 11 秒,超过回调的 10 秒超时 → 每次新设备登录都 502。Makefile 现在会在
+`make init` 之后、以及每次 `make start` / `make restart` 时用 `dedupe_rsakeys`
+(best-effort,保留最旧的那个)把 key 收敛到 1 个,所以 Ctrl-C 或手动 `creatersakey`
+留下的多余 key 下次启动会自动修回。若症状复发,检查并裁剪 key 数量:
 
     docker compose exec wk-oidc-server python manage.py shell -c \
       "from oidc_provider.models import RSAKey; k=RSAKey.objects.order_by('id').first(); print('before',RSAKey.objects.count()); k and RSAKey.objects.exclude(id=k.id).delete(); print('after',RSAKey.objects.count())"
 
-Confirm the diagnosis from the nginx access log: a healthy
-`POST /uc/oauth/token/` completes in well under 1s; a broken one takes ~10s.
-Outline-side the error is `invalid_grant` / `Expired OAuth state`; oidc-server
-logs `Bad Request: /uc/oauth/token/`.
+从 nginx 访问日志确认:健康的 `POST /uc/oauth/token/` 在 1 秒内完成,出问题的约 10 秒。
+Outline 侧报错是 `invalid_grant` / `Expired OAuth state`;oidc-server 记
+`Bad Request: /uc/oauth/token/`。
 
-### nginx access logs
+### nginx 访问日志(默认关闭 —— 排查时再开)
 
-`wk-nginx` uses the `json-file` driver with per-request timing in the log
-format (previously `driver: none`, which discarded all access/error logs and
-made any 502 invisible). `docker logs wk-nginx` shows the full request
-sequence with `rt=`/`urt=` timing, including Outline's server-side calls to
-`/uc/oauth/token/` and `/uc/oauth/userinfo/` — use it to attribute any
-gateway error.
+`wk-nginx` 以 `logging: driver: none` 运行,避免访问日志刷屏,所以平时
+`docker logs wk-nginx` 是空的(容器内的日志文件又软链到了 stdout/stderr,也没法用
+`docker exec` 读取)。这会导致任何 502 / 网关错误在开日志前完全看不到 —— 排查这类
+问题时**第一步就是把日志打开**。方法:把 `wk-nginx` 服务的 driver 改成 `json-file`
+(`docker-compose.yml` 和 `scripts/templates/docker-compose.yml` 两份都改),重建容器
+(`docker compose up -d wk-nginx` —— reload 不够,日志驱动在容器创建时定型),之后
+`docker logs wk-nginx` 就能看到完整请求序列和单请求耗时(`rt=` / `urt=`),包括
+Outline 后端对 `/uc/oauth/token/` 和 `/uc/oauth/userinfo/` 的调用。
+`config/nginx/default.conf` 里已经定义好 `log_format timed`,所以只需翻转 docker 这边
+的驱动即可。排查完记得改回 `none`。
