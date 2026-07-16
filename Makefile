@@ -1,6 +1,17 @@
 oidc_server_container=wk-oidc-server
 docker-compose := $(shell command -v docker-compose 2> /dev/null || echo "docker compose")
 
+# Best-effort trim of oidc_provider RSA signing keys down to one. oidc_provider
+# re-imports every key (importKey, ~0.4s each, uncached) on every token request,
+# so key accumulation makes the OIDC token exchange progressively slower until
+# it exceeds Outline's ~10s callback timeout and the browser sees a 502.
+# creatersakey (run by oidc-server's `make init` during `make install`) always
+# adds a key, and a Ctrl-C between creatersakey and the install-time dedupe (or
+# a manual creatersakey) can leave extras, so this also runs in `start`/`restart`
+# to self-heal. Best-effort (|| true): never fails the target — oidc-server may
+# not be ready yet on a cold start. Keeps the oldest key so its id stays stable.
+dedupe_rsakeys = ${docker-compose} exec ${oidc_server_container} python manage.py shell -c "from oidc_provider.models import RSAKey; k=RSAKey.objects.order_by('id').first(); k and RSAKey.objects.exclude(id=k.id).delete(); print('RSAKey count =', RSAKey.objects.count())" || true
+
 gen-conf:
 #	echo ${docker-compose}
 	cd ./scripts && bash ./main.sh init_cfg
@@ -8,10 +19,13 @@ gen-conf:
 start:
 	${docker-compose} up -d
 	cd ./scripts && bash ./main.sh reload_nginx
+	$(dedupe_rsakeys)
 
 install: gen-conf start
 	sleep 1
 	${docker-compose} exec ${oidc_server_container} bash -c "make init"
+	# make init just ran creatersakey (adds a key) — trim back to one.
+	$(dedupe_rsakeys)
 	${docker-compose} exec ${oidc_server_container} python manage.py shell -c "from oidc_provider.models import Client; Client.objects.filter(pk=1).delete()"
 	${docker-compose} exec ${oidc_server_container} bash -c "python manage.py loaddata oidc-server-outline-client"
 	$(MAKE) repair-oidc-client

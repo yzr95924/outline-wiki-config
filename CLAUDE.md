@@ -74,3 +74,45 @@ There is no build/test step — this repo is pure orchestration. Typical change 
 3. `make logs` to observe.
 
 To iterate on a single service without losing state: `make restart` (re-runs `init_cfg` and `reload_nginx`) or just `docker compose restart <svc>`.
+
+## Troubleshooting
+
+### New-device / incognito login returns 502 Bad Gateway or `notice=auth-error`
+
+OIDC login flow: browser → Outline `/auth/oidc.callback` → Outline exchanges
+the auth code at the oidc-server token endpoint (`OIDC_TOKEN_URI`, internal via
+`wk-nginx`) → sets session cookie and redirects. Outline applies a ~10s request
+timeout on the callback, so a slow token exchange surfaces as a 502 on the
+callback (`upstream prematurely closed connection while reading response
+header from upstream` in the nginx log). Outline's backend exchange can still
+succeed (a `users.signin` event is logged) — the browser just never receives
+the redirect. Existing sessions bypass OIDC entirely, so **only fresh logins
+(new device / incognito) are affected** — a strong tell.
+
+Root cause observed here: **RSA signing-key accumulation.** `make install`
+runs `creatersakey` unconditionally inside `wk-oidc-server`, so every install
+adds an `oidc_provider.RSAKey` row. `oidc_provider`'s `get_client_alg_keys`
+re-imports *every* RSA key (`importKey`, ~0.4s each, **uncached**) on every
+token request, so token-exchange time ≈ key_count × 0.4s. With ~28 keys that
+reached ~11s > the ~10s callback timeout → 502 on every new-device login. The
+Makefile dedupes to a single key (`dedupe_rsakeys`, best-effort, keeps the
+oldest) both after `make init` and on every `make start` / `make restart`, so
+Ctrl-C'd or manual `creatersakey` leftovers self-heal on the next start; if the
+symptom ever returns, check and trim the key count:
+
+    docker compose exec wk-oidc-server python manage.py shell -c \
+      "from oidc_provider.models import RSAKey; k=RSAKey.objects.order_by('id').first(); print('before',RSAKey.objects.count()); k and RSAKey.objects.exclude(id=k.id).delete(); print('after',RSAKey.objects.count())"
+
+Confirm the diagnosis from the nginx access log: a healthy
+`POST /uc/oauth/token/` completes in well under 1s; a broken one takes ~10s.
+Outline-side the error is `invalid_grant` / `Expired OAuth state`; oidc-server
+logs `Bad Request: /uc/oauth/token/`.
+
+### nginx access logs
+
+`wk-nginx` uses the `json-file` driver with per-request timing in the log
+format (previously `driver: none`, which discarded all access/error logs and
+made any 502 invisible). `docker logs wk-nginx` shows the full request
+sequence with `rt=`/`urt=` timing, including Outline's server-side calls to
+`/uc/oauth/token/` and `/uc/oauth/userinfo/` — use it to attribute any
+gateway error.
