@@ -33,6 +33,41 @@ make install
 - OIDC 用户管理后台：http://127.0.0.1:8888/uc/admin/auth/user/（添加新用户、修改密码等）
 - OIDC 登录页：http://127.0.0.1:8888/uc/accounts/login/
 
+## 升级 Outline 版本
+
+只需改版本号，再走一遍 make 流程。数据不丢（都在 `./data/`，bind mount，`clean-conf` 不碰它）。
+
+1. 改 `scripts/config.sh` 里的版本号：
+
+    ```bash
+    OUTLINE_VERSION=1.9.2   # 改成目标版本
+    ```
+
+2. 重新渲染并重启：
+
+    ```bash
+    make clean-conf && make install
+    ```
+
+3. 验证：
+
+    ```bash
+    docker compose ps wk-outline   # IMAGE 列应为新版本，STATUS 为 Up (healthy)
+    ```
+
+    再用浏览器打开 Outline 入口，确认能访问、能登录。
+
+`make clean-conf && make install` 做了什么：
+
+- 从 `config.sh` 重新渲染所有配置（含 `.env`——版本号在这里才真正生效）
+- `docker compose up -d` 拉取新镜像，**只重建 `wk-outline`**（postgres / redis / oidc-server / nginx 配置没变，持续在线不重建）
+- reload nginx（重建容器会换内网 IP，不 reload 会 502——见下文「已知陷阱」第 7 条）
+- 重新注册 OIDC client（幂等，不影响用户数据）
+
+> ⚠️ **不要**用 `make update-images` + `docker compose up -d wk-outline`：`docker compose` 读的是渲染产物 `.env`，光改 `config.sh` 不重新渲染，`.env` 里的版本号不变，**镜像升不上去**；手动 `up` 还不 reload nginx，会 **502**。
+>
+> 只动了版本号、想跳过全量重渲染：直接改 `.env` 里的 `OUTLINE_VERSION`，再跑 `make update-images && make restart`（`make restart` 自带 `reload_nginx`，不会 502）。
+
 ## 配置说明：`scripts/config.sh`
 
 | 变量 | 说明 |
@@ -356,13 +391,6 @@ wk-outline:
 docker compose exec wk-oidc-server python manage.py changepassword <username>
 ```
 
-**Q：升级 Outline 版本？**
-
-1. 改 `scripts/config.sh` 里的 `OUTLINE_VERSION`
-2. `make update-images`
-3. `docker compose up -d wk-outline`（应用新 image）
-4. `make repair-oidc-client`（保险，确保 OIDC client 状态对）
-
 ## 已知陷阱 / 升级注意
 
 1. **ddnsto 客户端对外是 HTTPS，本机 nginx 是 HTTP**：`scripts/templates/config/nginx/include/proxy.conf` 必须把 `X-Forwarded-Proto` 写死为 `https`。如果换穿透方案（比如 frp、cloudflared）需要重新评估该写什么。
@@ -376,3 +404,9 @@ docker compose exec wk-oidc-server python manage.py changepassword <username>
 5. **`logging: driver: none`**：默认关闭容器日志收集，`docker logs` 拿不到东西。调试时建议临时给 `wk-outline` 和 `wk-oidc-server` 加 `json-file` logging。
 
 6. **Outline 镜像升级可能影响 OIDC plugin 行为**：Outline 1.8.x 用了 `app.proxy = true` + `IsUrl` 校验，新版本可能改了默认值，升级后请走一遍完整 OIDC 流程验证。
+
+7. **重建容器后 nginx 可能 502（upstream IP 缓存）**：`wk-nginx` 的 worker 在启动时解析一次 `wk-outline` 等上游容器名并固化在进程里，之后不再重新解析。只要 `wk-outline` 被重建（升级、`docker compose up -d` 重建等），Docker 会给它分配新的内网 IP，而 nginx 还在打旧 IP → 502；特征是访问极快返回（几毫秒，说明根本没连上 upstream）。判别：在 nginx 容器里 `curl http://wk-outline:3000/` 是 200（curl 现场重新解析 DNS），但走 `http://<URL>` 是 502。`make install`/`start`/`restart` 都已经 `reload_nginx`，所以走 make 流程没事；凡是手动 `docker compose up -d wk-outline` 或重建过 outline 的，都要补一句：
+
+    ```bash
+    docker compose exec wk-nginx nginx -s reload
+    ```
