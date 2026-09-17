@@ -17,7 +17,7 @@
   "reuse_consent": true,
   "require_consent": true,
   "_redirect_uris": "${URL}/auth/oidc.callback",
-  "_post_logout_redirect_uris": "",
+  "_post_logout_redirect_uris": "${URL}",
   "_scope": "",
   "response_types": [
    1,

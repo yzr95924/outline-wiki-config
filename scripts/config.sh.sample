@@ -13,8 +13,9 @@ LANGUAGE_CODE=en-us
 TIME_ZONE=UTC
 FORCE_HTTPS=false
 # The domain in you email.
-# Comma separated list of domains to be allowed (optional).
-# If not set, the first user's domain is allowed by default.
+# (Deprecated) Outline 1.10.x moved the domain allowlist into team settings
+# (empty = all domains allowed) and no longer reads this env var. Identity is
+# controlled by giving every oidc-server user a unique email instead.
 ALLOWED_DOMAINS=
 
 # Docker image version

@@ -53,6 +53,9 @@ function create_outline_env_file {
     cp ./templates/$fn $env_file
 
     env_replace URL $URL $env_file
+    # CDN_URL was previously filled only as a side effect of the (then
+    # unanchored) URL sed matching `CDN_URL=` too — replace it explicitly.
+    env_replace CDN_URL $URL $env_file
     env_replace SECRET_KEY $OUTLINE_SECRET_KEY $env_file
     env_replace UTILS_SECRET $OUTLINE_UTILS_SECRET $env_file
     env_replace DEFAULT_LANGUAGE $DEFAULT_LANGUAGE $env_file
@@ -84,6 +87,7 @@ function create_oidc_env_file {
 
     env_replace OIDC_CLIENT_SECRET "$OIDC_CLIENT_SECRET" $env_file
     env_replace OIDC_AUTH_URI "${URL}/uc/oauth/authorize/" $env_file
+    env_replace OIDC_LOGOUT_URI "${URL}/uc/oauth/end-session" $env_file
 }
 
 function create_uc_env_file {
@@ -99,6 +103,10 @@ function create_uc_env_file {
 function create_uc_db_init_file {
     fn=oidc-server-outline-client.json
     file=../config/uc/fixtures/$fn
+    # config/ is entirely gitignored, so a fresh clone has no config/uc
+    # fixtures dir yet — create it (and with `set -e` from utils.sh a failed
+    # cp here would abort init_cfg before config/nginx is rendered).
+    mkdir -p ../config/uc/fixtures
     cp ./templates/$fn $file
 
     env_tmpl_replace OIDC_CLIENT_SECRET "$OIDC_CLIENT_SECRET" $file
@@ -118,6 +126,7 @@ function create_env_files {
 }
 
 function create_apps_config {
+    mkdir -p ../config
     cp -r ./templates/config/* ../config/
     if [ $FILE_STORAGE != "s3" ]; then
       rm_block "MINIO" "../config/nginx/default.conf"

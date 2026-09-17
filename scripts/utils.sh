@@ -30,7 +30,10 @@ function env_replace {
     key=$1
     val=$2
     filename=$3
-    sed "s|${key}=.*|${key}=${val}|" -i $filename
+    # Anchor to line start: an unanchored `KEY=.*` also mangles any line that
+    # merely CONTAINS the key (e.g. `DATABASE_URL=` under `URL=`, `CDN_URL=`
+    # silently picking up the URL value). Exact-key lines only.
+    sed "s|^${key}=.*|${key}=${val}|" -i $filename
 }
 
 function env_tmpl_replace {
@@ -43,7 +46,9 @@ function env_tmpl_replace {
 function env_delete {
     key=$1
     filename=$2
-    sed "/${key}/d" -i $filename
+    # Anchored, like env_replace — deleting substring matches would also drop
+    # unrelated lines that merely contain the key.
+    sed "/^${key}=/d" -i $filename
 }
 
 function rm_block {

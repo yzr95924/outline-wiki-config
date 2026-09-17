@@ -23,13 +23,13 @@ All operations go through the `Makefile` (uses `docker-compose` or `docker compo
 - `make clean` — `clean-docker` + `clean-conf` (removes generated `.env`, `env.*`, `docker-compose.yml`, `config/uc/fixtures/*.json`, `config/nginx`). Keeps `data/`.
 - `make clean-data` — also wipes persistent volumes under `data/` (postgres, uc, outline). **Destructive.**
 
-A standalone `cleanup_outline.sh` is provided to trigger Outline's daily cron manually via its API (token is hardcoded in that file and is the `OUTLINE_UTILS_SECRET` from `config.sh`).
+A standalone `cleanup_outline.sh` is provided to trigger Outline's daily cron manually via its API. It carries no token: it reads `URL` + `UTILS_SECRET` from the rendered `env.outline` (or `OUTLINE_URL` / `OUTLINE_UTILS_SECRET` env overrides).
 
 ## Configuration
 
 1. Copy `scripts/config.sh.sample` → `scripts/config.sh` and edit.
 2. The script auto-fills any blank `*_SECRET_KEY` / `*_ACCESS_KEY` with `openssl rand -hex N` on first run and writes them back into `scripts/config.sh`. Don't hand-edit these placeholders.
-3. Notable knobs: `URL` (public URL), `HTTP_IP`/`HTTP_PORT_IP` (nginx bind), `ALLOWED_DOMAINS` (comma-separated; required when a non-admin user's email domain differs from the first admin's), `NETWORKS` / `NETWORKS_EXTERNAL` (attach to an existing Docker network, e.g. when fronted by a host/nginx proxy — see `config/sample/nginx_outline.conf`).
+3. Notable knobs: `URL` (public URL), `HTTP_IP`/`HTTP_PORT_IP` (nginx bind), `ALLOWED_DOMAINS` (legacy — still rendered into `env.outline` but Outline 1.10.x no longer reads it; domain allowlisting now lives in Outline team settings), `NETWORKS` / `NETWORKS_EXTERNAL` (attach to an existing Docker network, e.g. when fronted by a host/nginx proxy — see `config/sample/nginx_outline.conf`).
 
 ## Architecture / how a fresh install flows
 
@@ -61,7 +61,7 @@ Generated files (all in `.gitignore`): root `.env`, `env.outline`, `env.oidc`, `
 ## Endpoints
 
 - Outline UI: `http://<URL>` (default `http://127.0.0.1:8888`).
-- OIDC admin (add users): `<URL>/uc/admin/auth/user/`. New users must have an email; if the email domain differs from the first admin's, add it to `ALLOWED_DOMAINS` in `scripts/config.sh` and re-run `make install` (or just edit `env.outline` and restart outline).
+- OIDC admin (add users): `<URL>/uc/admin/auth/user/`. **Every user must have a unique email** — Outline keys identity by email, and the bundled IdP sends no `email_verified` claim: an account reusing an existing member's email either silently signs into that member's Outline account (if it has logged in before, via its `user_authentications` binding) or fails login with "Your email address has not been verified" (new binding, `userProvisioner` rejects unverified email matching an existing user). Domain doesn't matter on Outline 1.10.x: the allowlist moved to team settings (`team_domains` table, empty = all domains allowed) and the `ALLOWED_DOMAINS` env is no longer read. Regular wiki members don't need Django `is_superuser` — only the one account used for `/uc/admin` should keep it.
 - OIDC authorize: `<URL>/uc/oauth/authorize/` (internal value used by Outline's `OIDC_AUTH_URI`).
 - Cleanup cron: `cleanup_outline.sh` (manual cron trigger).
 
@@ -82,6 +82,42 @@ There is no build/test step — this repo is pure orchestration. Typical change 
 To iterate on a single service without losing state: `make restart` (re-runs `init_cfg` and `reload_nginx`) or just `docker compose restart <svc>`.
 
 ## 排查
+
+### 不要在 Outline 设置里配置"允许的域名"(Allowed Domains)
+
+自带的 oidc-server 不发 `email_verified` claim(`oidc_provider_settings.userinfo` 只设置
+name / preferred_username,claims 里的空值会被清掉)。Outline 的 `userProvisioner` 规定:
+邮箱未验证时,只要"邮箱匹配到已有用户"或"团队配置了 allowedDomains"就拒绝登录。已有
+`user_authentications` 绑定的老用户走早返回路径不受影响,但**一旦在 Outline
+Settings → Members 里配了 Allowed Domains,所有新用户的 OIDC 登录都会报
+"Your email address has not been verified"**。目前 `team_domains` 为空 = 放行所有域名,
+保持为空即可(唯一邮箱才是真正的准入控制)。要修就得给 IdP 补
+`claims["email_verified"] = True`(文件在镜像里,需挂载覆盖)。
+
+### 登出 Outline 后刷新又自动登录
+
+Outline 的 logout(`POST /api/auth.delete`)本身是成功的(events 表有 `users.signout`),
+但 IdP 与 Outline 同域挂载在 `/uc`,Django 的 `sessionid` cookie 不随 Outline 登出失效;
+下次点登录时 `/uc/oauth/authorize` 静默通过,几秒内又被登回来(events 里 `users.signout`
+后面紧跟一条 `users.signin`,service=oidc —— 这是强判别特征)。
+
+根因:Outline 1.10.x 的 OIDC 插件在**手动配置模式**(同时设置了 `OIDC_AUTH_URI` /
+`OIDC_TOKEN_URI` / `OIDC_USERINFO_URI`)下不做 discovery,`logoutURL` 只读环境变量
+`OIDC_LOGOUT_URI`;不配时 `/auth/oidc.logout` 直接 `redirect("/")`,永远不会调 IdP 的
+`end-session` 端点(`/uc/oauth/end-session`,继承 Django `LogoutView`,会杀掉 session)。
+
+已修(2026-09):`scripts/templates/env.oidc` 增加占位、`scripts/main.sh` 注入
+`OIDC_LOGOUT_URI=${URL}/uc/oauth/end-session`;fixture(`templates/oidc-server-outline-client.json`)
+的 `_post_logout_redirect_uris` 设为 `${URL}`,否则 end-session 杀完 session 会落到 Django
+自己的登录页而不是跳回 Outline(线上 client `050984` 已同步改)。验证:
+
+    curl -s -o /dev/null -w '%{redirect_url}\n' -H 'Host: <URL>' \
+      'http://127.0.0.1:8888/auth/oidc.logout'
+    # 应 302 到 /uc/oauth/end-session?client_id=...&post_logout_redirect_uri=...
+
+注意:修复前已登录的浏览器没有 `id_token_hint` 储备(`LogoutTokenStore` 只在 logoutURL
+存在时才持久化),修复后**第一次**登出会落到 Django 登录页(session 仍被正确杀掉);
+再次登录之后的登出就会正常跳回 Outline 登录页。
 
 ### 新设备 / 无痕窗口登录报 502 Bad Gateway 或 `notice=auth-error`
 

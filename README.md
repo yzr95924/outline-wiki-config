@@ -74,7 +74,7 @@ make install
 | --- | --- |
 | `URL` | 对外可访问的 Outline URL，**不要带端口号**（除非端口不是 80/443） |
 | `HTTP_IP` / `HTTP_PORT_IP` | nginx 监听的 IP 和端口（用户访问这里） |
-| `ALLOWED_DOMAINS` | 允许登录的邮箱域名（逗号分隔）。**新增用户邮箱的域名与首个管理员不同时必须设置** |
+| `ALLOWED_DOMAINS` | （已失效）Outline 1.10.x 起域名白名单移到了 Outline 团队设置里（默认放行所有域名），此变量仅保留兼容、不再被读取 |
 | `OUTLINE_VERSION` | Outline 镜像版本号 |
 | `*_SECRET_KEY` / `*_ACCESS_KEY` | 各种密钥，`make install` 第一次跑会自动生成，**不要手填** |
 
@@ -378,12 +378,26 @@ wk-outline:
 
 **修复**：清浏览器 cookie，特别是 `your-domain` 和 `your-domain/uc` 两个域下的 cookie，然后重新访问 `https://your-domain/auth/oidc`。
 
+### 6. 登出 Outline 后刷新又自动登录
+
+**症状**：点登出后刷新页面，仍然是登录态（events 表里 `users.signout` 后几秒紧跟一条 `users.signin`）。
+
+**根因**：Outline 的登出只杀自己的 session；IdP 挂在同一域名的 `/uc` 下，Django 的 `sessionid` cookie 依然有效，下次登录走 `/uc/oauth/authorize` 静默通过。Outline 1.10.x 在 OIDC 手动配置模式（同时设置 `OIDC_AUTH_URI`/`OIDC_TOKEN_URI`/`OIDC_USERINFO_URI`）下不做 discovery，只认 `OIDC_LOGOUT_URI` 环境变量；不配的话永远不会调 IdP 的 end-session 端点。
+
+**修复**（模板已内置）：`env.oidc` 里的 `OIDC_LOGOUT_URI=<URL>/uc/oauth/end-session`，加上 oidc client 的 `_post_logout_redirect_uris` 包含 `<URL>`（模板 `scripts/templates/oidc-server-outline-client.json` 已设 `${URL}`）。改完 `docker compose up -d wk-outline` 重建。线上 client 可手动补：
+
+```bash
+docker compose exec wk-oidc-server python manage.py shell -c \
+  "from oidc_provider.models import Client; c=Client.objects.get(client_id='050984'); c._post_logout_redirect_uris='https://your-domain'; c.save()"
+```
+
+
 ## FAQ
 
 **Q：新增了用户，但用户登录不了 Outline？**
 
-- 用户必须有邮箱
-- 如果邮箱域名与第一个管理员的域名不同，把这个域名加到 `scripts/config.sh` 的 `ALLOWED_DOMAINS`，然后 `make install`
+- 用户必须有邮箱，且**不能和其他用户重复** —— Outline 以邮箱作为身份：新用户的邮箱若与已有成员相同，登录时会报 "Your email address has not been verified"（自带的 oidc-server 不发 `email_verified` claim），永远不会在 Outline 里建出新账户
+- 邮箱域名不限：Outline 1.10.x 的域名白名单在团队设置里，默认放行所有域名（`ALLOWED_DOMAINS` 环境变量已不被读取）
 
 **Q：怎么改 OIDC superuser 密码？**
 
